@@ -37,6 +37,7 @@ class Program
     private static readonly HttpClient _apiClient = new();
     private static readonly string _libsPath = Path.Combine(Environment.CurrentDirectory, "Libs");
     private static readonly string _cachePath = Path.Combine(Environment.CurrentDirectory, "Cache");
+    private static readonly string _outputPath = Path.Combine(Environment.CurrentDirectory, "Output");
 
     public static void Main(string[] args)
     {
@@ -48,34 +49,55 @@ class Program
 
     private static async Task MainAsync(string[] args, CancellationToken token)
     {
-        AuthTokenResponse auth = await GetAuthAsync(token);
-        FBuildPatchAppManifest manifest = await GetManifestAsync(args, auth, token);
-        FFileManifest fileManifest = manifest.FileManifestList.First(x => x.FileName == LauncherContentNotiFile);
-        FFileManifestStream fileStream = fileManifest.GetStream(false);
+        AuthTokenResponse auth = null!;
 
-        byte[] fileBytes = await fileStream.SaveBytesAsync(cancellationToken: token);
-        string fileContent = Encoding.UTF8.GetString(fileBytes);
-
-        BuildNotificationsData buildNotificationData = JsonSerializer.Deserialize<BuildNotificationsData>(fileContent)!;
-
-        foreach (BuildNotification notification in buildNotificationData.BuildNotifications)
+        try
         {
-            FFileManifest? imageFile = manifest.FileManifestList.FirstOrDefault(x => x.FileName == notification.ImagePath);
+            auth = await GetAuthAsync(token);
+            FBuildPatchAppManifest manifest = await GetManifestAsync(args, auth, token);
+            FFileManifest fileManifest = manifest.FileManifestList.First(x => x.FileName == LauncherContentNotiFile);
+            FFileManifestStream fileStream = fileManifest.GetStream(false);
 
-            if (imageFile is not null)
+            byte[] fileBytes = await fileStream.SaveBytesAsync(cancellationToken: token);
+            string fileContent = Encoding.UTF8.GetString(fileBytes);
+
+            BuildNotificationsData buildNotificationData = JsonSerializer.Deserialize<BuildNotificationsData>(fileContent)!;
+
+            if (!Directory.Exists(_outputPath))
             {
-                using FileStream imgFileStream = new($"./~EGL-Notifications-Image.{imageFile.FileName}", FileMode.OpenOrCreate, FileAccess.Write);
-                using FFileManifestStream imgStream = imageFile!.GetStream();
+                Directory.CreateDirectory(_outputPath);
+            }
 
-                await imgStream.SaveToAsync(imgFileStream, cancellationToken: token);
+            foreach (BuildNotification notification in buildNotificationData.BuildNotifications)
+            {
+                if (manifest.FileManifestList.FirstOrDefault(x => x.FileName == notification.ImagePath) is FFileManifest imgFile)
+                {
+                    string imgPath = Path.Combine(_outputPath, $"img-{imgFile.FileName}");
+
+                    using FileStream imgFileStream = new(imgPath, FileMode.OpenOrCreate, FileAccess.Write);
+                    using FFileManifestStream imgStream = imgFile!.GetStream();
+
+                    await imgStream.SaveToAsync(imgFileStream, cancellationToken: token);
+                }
+            }
+
+            string formattedContent = JsonSerializer.Serialize(
+                buildNotificationData.BuildNotifications,
+                options: new()
+                {
+                    WriteIndented = true,
+                });
+
+            await File.WriteAllTextAsync(Path.Combine(_outputPath, $"notifications.json"), formattedContent, token);
+        }
+        finally
+        {
+            // Cleanup
+            if (auth is not null)
+            {
+                await KillAuthAsync(auth, token);
             }
         }
-
-        // TODO: json beautify
-        File.WriteAllText("./~EGL-Notifications.json", fileContent);
-
-        // Cleanup
-        await KillAuthAsync(auth, token);
     }
 
     private static string? GetArg(string[] args, string argName)
