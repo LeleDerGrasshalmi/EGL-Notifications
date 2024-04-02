@@ -1,175 +1,214 @@
-﻿using System;
+﻿using EpicGamesLauncher.Notifications.Models;
+
+using EpicManifestParser;
+using EpicManifestParser.Api;
+using EpicManifestParser.UE;
+
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using EpicManifestParser.Objects;
-using System.Collections.Generic;
-using Newtonsoft.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
-namespace EGL_Notis
+using ZlibngDotNet;
+
+namespace EpicGamesLauncher.Notifications;
+
+class Program
 {
-    class Program
+    private const string AuthBaseUrl = "https://account-public-service-prod.ol.epicgames.com/account/api/oauth";
+    private const string LauncherAssetsUrl = "https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/Windows/launcher";
+
+    // launcherAppClient2
+    private const string LauncherClientId = "34a02cf8f4414e29b15921876da36f9a";
+    private const string LauncherClientSecret = "daafbccc737745039dffe53d94fc76cf";
+
+    private const string LauncherContentApp = "EpicGamesLauncherContent";
+    private const string LauncherContentNotiFile = "BuildNotificationsV2.json";
+
+    private const string LabelArg = "--label";
+
+    private static readonly HttpClient _apiClient = new();
+    private static readonly string _libsPath = Path.Combine(Environment.CurrentDirectory, "Libs");
+    private static readonly string _cachePath = Path.Combine(Environment.CurrentDirectory, "Cache");
+
+    public static void Main(string[] args)
     {
-        public static string _token = "";
-        public static string _manifesturl = "";
+        CancellationTokenSource csrc = new();
+        CancellationToken token = csrc.Token;
 
-        static void Main(string[] args)
+        MainAsync(args, token).GetAwaiter().GetResult();
+    }
+
+    private static async Task MainAsync(string[] args, CancellationToken token)
+    {
+        AuthTokenResponse auth = await GetAuthAsync(token);
+        FBuildPatchAppManifest manifest = await GetManifestAsync(args, auth, token);
+        FFileManifest fileManifest = manifest.FileManifestList.First(x => x.Filename == LauncherContentNotiFile);
+        FFileManifestStream fileStream = fileManifest.GetStream(false);
+
+        byte[] fileBytes = await fileStream.SaveBytesAsync(cancellationToken: token);
+        string fileContent = Encoding.UTF8.GetString(fileBytes);
+
+        BuildNotificationsData buildNotificationData = JsonSerializer.Deserialize<BuildNotificationsData>(fileContent)!;
+
+        foreach (BuildNotification notification in buildNotificationData.BuildNotifications)
         {
-            Console.WriteLine("Hello World!");
+            FFileManifest? imageFile = manifest.FileManifestList.FirstOrDefault(x => x.Filename == notification.ImagePath);
 
-            GetAccessToken();
-            string manifestURL = GetManifestUrl();
-            Console.WriteLine(manifestURL);
-
-            byte[] manifestData = GetManifest();
-            File.WriteAllBytes("data.manifest", manifestData);
-            EpicManifestParser.Objects.Manifest manifest = new EpicManifestParser.Objects.Manifest(manifestData, new ManifestOptions
+            if (imageFile is not null)
             {
-                ChunkBaseUri = new Uri("http://epicgames-download1.akamaized.net/Builds/UnrealEngineLauncher/CloudDir/ChunksV4/", UriKind.Absolute),
-                ChunkCacheDirectory = Directory.CreateDirectory("./~Chunks")
-            });
+                using FileStream imgFileStream = new($"./~EGL-Notifications-Image.{imageFile.Filename}", FileMode.OpenOrCreate, FileAccess.Write);
+                using FFileManifestStream imgStream = imageFile!.GetStream();
 
-            FileManifest notificationsFile = manifest.FileManifests.Find(x => x.Name == "BuildNotificationsV2.json");
-            FileManifestStream notiManifestFileStream = notificationsFile!.GetStream();
+                await imgStream.SaveToAsync(imgFileStream, cancellationToken: token);
+            }
+        }
 
-            MemoryStream fileMemoryStream = new MemoryStream((int)notiManifestFileStream.Length);
-            notiManifestFileStream.Save(fileMemoryStream);
+        // TODO: json beautify
+        File.WriteAllText("./~EGL-Notifications.json", fileContent);
 
-            string notiFileStr = Encoding.Default.GetString(fileMemoryStream.ToArray());
-            NotificationsRoot notiFile = JsonConvert.DeserializeObject<NotificationsRoot>(notiFileStr);
+        // Cleanup
+        await KillAuthAsync(auth, token);
+    }
 
-            List<Notification> fortniteNotis = notiFile.BuildNotifications.Where(e => e.DisplayCondition.Contains("IsEntitled(48ff3f41680e403bb2717737f68731c5)")).ToList();
-            foreach (Notification noti in fortniteNotis)
+    private static string? GetArg(string[] args, string argName)
+    {
+        string? arg = args.FirstOrDefault(x => x.StartsWith(argName));
+
+        // +1, because we need to substring after "="
+        return arg?[(argName.Length + 1)..];
+    }
+
+    private static async Task EnsureSuccessResponseAsync(HttpResponseMessage res, CancellationToken token)
+    {
+        if (!res.IsSuccessStatusCode)
+        {
+            StringBuilder builder = new();
+
+            if (res.RequestMessage is not null)
             {
-                var img = manifest.FileManifests.Find(x => x.Name == noti.ImagePath);
-                if (img != null)
+                builder.Append($"Request {res.RequestMessage.Method} {res.RequestMessage.RequestUri}");
+            }
+            else
+            {
+                builder.Append($"Request");
+            }
+
+            builder.Append(' ');
+            builder.Append($"failed with status {(int)res.StatusCode} {res.ReasonPhrase ?? res.StatusCode.ToString()}");
+
+            if (res.Content is not null
+                && res.Content.Headers.ContentLength is not null and > 0)
+            {
+                builder.AppendLine();
+                builder.Append(await res.Content.ReadAsStringAsync(token));
+            }
+
+            throw new HttpRequestException(builder.ToString(), null, res.StatusCode);
+        }
+    }
+
+    private static async Task<T?> ParseResponseAsync<T>(HttpResponseMessage res, CancellationToken token) where T : class
+    {
+        await EnsureSuccessResponseAsync(res, token);
+
+        return await res.Content.ReadFromJsonAsync<T>(cancellationToken: token);
+    }
+
+    private static async Task<AuthTokenResponse> GetAuthAsync(CancellationToken token)
+    {
+        HttpRequestMessage request = new()
+        {
+            RequestUri = new Uri($"{AuthBaseUrl}/token"),
+            Method = HttpMethod.Post,
+            Content = new FormUrlEncodedContent(new List<KeyValuePair<string, string>>
+            {
+                new("grant_type", "client_credentials"),
+                new("token_type", "eg1"),
+            }),
+        };
+
+        byte[] basicAuthBytes = Encoding.UTF8.GetBytes($"{LauncherClientId}:{LauncherClientSecret}");
+        string basicAuthBase64 = Convert.ToBase64String(basicAuthBytes);
+        request.Headers.Authorization = new AuthenticationHeaderValue("basic", basicAuthBase64);
+
+        HttpResponseMessage res = await _apiClient.SendAsync(request, token);
+        AuthTokenResponse? auth = await ParseResponseAsync<AuthTokenResponse>(res, token);
+
+        ArgumentNullException.ThrowIfNull(auth);
+
+        return auth;
+    }
+
+    private static async Task KillAuthAsync(AuthTokenResponse auth, CancellationToken token)
+    {
+        HttpRequestMessage request = new()
+        {
+            RequestUri = new Uri($"{AuthBaseUrl}/sessions/kill/{auth.AccessToken}"),
+            Method = HttpMethod.Delete,
+        };
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(auth.TokenType, auth.AccessToken);
+
+        HttpResponseMessage res = await _apiClient.SendAsync(request, token);
+
+        await EnsureSuccessResponseAsync(res, token);
+    }
+
+    private static async Task<FBuildPatchAppManifest> GetManifestAsync(string[] args, AuthTokenResponse auth, CancellationToken token)
+    {
+        string label = GetArg(args, LabelArg) ?? "Live";
+
+        HttpRequestMessage request = new()
+        {
+            RequestUri = new Uri($"{LauncherAssetsUrl}?label={label}"),
+            Method = HttpMethod.Get,
+        };
+
+        request.Headers.Authorization = new AuthenticationHeaderValue(auth.TokenType, auth.AccessToken);
+
+        HttpResponseMessage res = await _apiClient.SendAsync(request, token);
+
+        await EnsureSuccessResponseAsync(res, token);
+
+        ManifestInfo? manifestInfo = await res.Content.ReadManifestInfoAsync(token);
+        ArgumentNullException.ThrowIfNull(manifestInfo);
+
+        (FBuildPatchAppManifest manifest, ManifestInfoElement infoElement) = await manifestInfo.DownloadAndParseAsync(
+            elementPredicate: x => x.AppName == LauncherContentApp,
+            optionsBuilder: (opt) =>
+            {
+                if (OperatingSystem.IsWindows())
                 {
-                    using (var imgFileStream = new FileStream($"./~EGL-Notifications-Image.{img.Name}", FileMode.OpenOrCreate, FileAccess.Write))
-                    {
-                        using (var imgStream = img!.GetStream())
-                        {
-                            imgStream.Save(imgFileStream);
-                        }
-                    }
+                    opt.Zlibng = new Zlibng(Path.Combine(_libsPath, "zlib-ng2.dll"));
                 }
-            }
-            File.WriteAllText("./~EGL-Notifications.FN.json", JsonConvert.SerializeObject(notiFile, Formatting.Indented));
-            File.WriteAllText("./~EGL-Notifications.FN.txt", notiFileStr);
-        }
+                else if (OperatingSystem.IsLinux())
+                {
+                    opt.Zlibng = new Zlibng(Path.Combine(_libsPath, "libz-ng.so"));
+                }
+                else
+                {
+                    throw new PlatformNotSupportedException();
+                }
 
-        private static string GetAccessToken()
-        {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create($"https://account-public-service-prod03.ol.epicgames.com/account/api/oauth/token");
-            request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
-            request.Method = "POST";
+                if (!Directory.Exists(_cachePath))
+                {
+                    Directory.CreateDirectory(_cachePath);
+                }
 
-            request.ContentType = "application/x-www-form-urlencoded";
-            request.UserAgent = "UELauncher/13.1.2-18458102+++Portal+Release-Live Windows/10.0.19042.1.256.64bit";
-            request.Headers.Add("X-Epic-Correlation-ID", "UE4-9d44f1444730e0ab67b97c96877fd423-4456F05F406FD9A4D2DC75A6EC8D70CF-5B619D4544431FD6636BF69374BDCA3D");
-            request.Headers.Add("Authorization", "basic MzRhMDJjZjhmNDQxNGUyOWIxNTkyMTg3NmRhMzZmOWE6ZGFhZmJjY2M3Mzc3NDUwMzlkZmZlNTNkOTRmYzc2Y2Y=");
+                opt.ChunkBaseUrl = $"http://epicgames-download1.akamaized.net/Builds/UnrealEngineLauncher/CloudDir/";
+                opt.ManifestCacheDirectory = _cachePath;
+                opt.ChunkCacheDirectory = _cachePath;
+            },
+            cancellationToken: token);
 
-            var body = Encoding.ASCII.GetBytes($"grant_type=client_credentials&token_type=eg1");
-            using (var stream = request.GetRequestStream())
-            {
-                stream.Write(body, 0, body.Length);
-            }
-
-            HttpWebResponse response;
-            try { response = (HttpWebResponse)request.GetResponse(); } catch (WebException ee) { response = (HttpWebResponse)ee.Response; }
-
-            _token = ((dynamic)JsonConvert.DeserializeObject(new StreamReader(response.GetResponseStream()).ReadToEnd())).access_token;
-            return _token;
-        }
-
-        private static string GetManifestUrl()
-        {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create($"https://launcher-public-service-prod06.ol.epicgames.com/launcher/api/public/assets/v2/platform/Windows/launcher?label=Live");
-            request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
-
-            request.ContentType = "application/x-www-form-urlencoded";
-            request.UserAgent = "UELauncher/13.1.2-18458102+++Portal+Release-Live Windows/10.0.19042.1.256.64bit";
-            request.Headers.Add("X-Epic-Correlation-ID", "UE4-9d44f1444730e0ab67b97c96877fd423-4456F05F406FD9A4D2DC75A6EC8D70CF-5B619D4544431FD6636BF69374BDCA3D");
-            request.Headers.Add("Authorization", $"bearer {GetAccessToken()}");
-
-            HttpWebResponse response;
-            try { response = (HttpWebResponse)request.GetResponse(); } catch (WebException ee) { response = (HttpWebResponse)ee.Response; }
-
-            var raw = new StreamReader(response.GetResponseStream()).ReadToEnd();
-            root data = System.Text.Json.JsonSerializer.Deserialize<root>(raw);
-            Manifest manifest = data.elements.Find(e => e.appName == "EpicGamesLauncherContent").manifests[0];
-
-            List<queryParam> queryParams = manifest.queryParams;
-            string baseURL = manifest.uri;
-            string query = String.Join("&", queryParams.ConvertAll<string>(e => $"{e.name}={e.value}").ToArray());
-
-            _manifesturl = $"{baseURL}?{query}";
-            return _manifesturl;
-        }
-
-        private static byte[] GetManifest()
-        {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(_manifesturl);
-            request.AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip;
-
-            HttpWebResponse response;
-            try { response = (HttpWebResponse)request.GetResponse(); } catch (WebException ee) { response = (HttpWebResponse)ee.Response; }
-
-            MemoryStream ms = new MemoryStream();
-            response.GetResponseStream().CopyTo(ms);
-            return ms.ToArray();
-        }
-    }
-
-    class queryParam
-    {
-        public string name { get; set; }
-        public string value { get; set; }
-    }
-
-    class root
-    {
-        public List<ManifestEntry> elements { get; set; }
-    }
-
-    class ManifestEntry
-    {
-        public string appName { get; set; }
-        public string labelName { get; set; }
-        public string buildVersion { get; set; }
-        public string hash { get; set; }
-        public List<Manifest> manifests { get; set; }
-    }
-
-    class Manifest
-    {
-        public string uri { get; set; }
-        public List<queryParam> queryParams { get; set; }
-    }
-
-    class NotificationsRoot
-    {
-        public List<Notification> BuildNotifications { get; set; }
-    }
-
-    class Notification
-    {
-        public string NotificationId { get; set; }
-        public string DisplayCondition { get; set; }
-        public string LayoutPath { get; set; }
-        public string DismissId { get; set; }
-        public string ImagePath { get; set; }
-        public string UriLink { get; set; }
-
-        public bool IsAdvert { get; set; }
-        public bool IsFreeGame { get; set; }
-
-        public string Title { get; set; }
-        public string Description { get; set; }
-        public List<string> AccountCountryBlackList { get; set; }
-
-        [JsonExtensionData]
-        public IDictionary<string, object> Extensions {  get; set; }
+        return manifest;
     }
 }
