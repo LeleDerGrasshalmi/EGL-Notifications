@@ -6,11 +6,11 @@ namespace EpicGamesLauncher.Notifications.Models;
 public class AuthTokenResponse
 {
     [JsonPropertyName("access_token")]
-    public string AccessToken { get; set; }
+    public required string AccessToken { get; set; }
 
     [JsonPropertyName("expires_at")]
-    public DateTime ExpiresAt { get; set; }
+    public required DateTime ExpiresAt { get; set; }
 
     [JsonPropertyName("token_type")]
-    public string TokenType { get; set; }
+    public required string TokenType { get; set; }
 }
