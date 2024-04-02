@@ -50,7 +50,7 @@ class Program
     {
         AuthTokenResponse auth = await GetAuthAsync(token);
         FBuildPatchAppManifest manifest = await GetManifestAsync(args, auth, token);
-        FFileManifest fileManifest = manifest.FileManifestList.First(x => x.Filename == LauncherContentNotiFile);
+        FFileManifest fileManifest = manifest.FileManifestList.First(x => x.FileName == LauncherContentNotiFile);
         FFileManifestStream fileStream = fileManifest.GetStream(false);
 
         byte[] fileBytes = await fileStream.SaveBytesAsync(cancellationToken: token);
@@ -60,11 +60,11 @@ class Program
 
         foreach (BuildNotification notification in buildNotificationData.BuildNotifications)
         {
-            FFileManifest? imageFile = manifest.FileManifestList.FirstOrDefault(x => x.Filename == notification.ImagePath);
+            FFileManifest? imageFile = manifest.FileManifestList.FirstOrDefault(x => x.FileName == notification.ImagePath);
 
             if (imageFile is not null)
             {
-                using FileStream imgFileStream = new($"./~EGL-Notifications-Image.{imageFile.Filename}", FileMode.OpenOrCreate, FileAccess.Write);
+                using FileStream imgFileStream = new($"./~EGL-Notifications-Image.{imageFile.FileName}", FileMode.OpenOrCreate, FileAccess.Write);
                 using FFileManifestStream imgStream = imageFile!.GetStream();
 
                 await imgStream.SaveToAsync(imgFileStream, cancellationToken: token);
