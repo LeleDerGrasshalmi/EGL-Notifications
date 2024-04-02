@@ -1,23 +1,20 @@
 ﻿using System.Collections.Generic;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace EpicGamesLauncher.Notifications.Models;
 
-public class BuildNotification
+public class BuildNotification : Dictionary<string, JsonElement>
 {
-    public required string NotificationId { get; set; }
-    public required string DisplayCondition { get; set; }
-    public required string LayoutPath { get; set; }
-    public required string DismissId { get; set; }
-    public required string ImagePath { get; set; }
-    public required string UriLink { get; set; }
+    public string NotificationId => this[nameof(NotificationId)].GetString()!;
+    public string DisplayCondition => this[nameof(DisplayCondition)].GetString()!;
+    public string LayoutPath => this[nameof(LayoutPath)].GetString()!;
+    public string DismissId => this[nameof(DismissId)].GetString()!;
+    public string ImagePath => this[nameof(ImagePath)].GetString()!;
+    public string UriLink => this[nameof(UriLink)].GetString()!;
 
-    public required bool IsAdvert { get; set; }
-    public required bool IsFreeGame { get; set; }
-
-    public required string Title { get; set; }
-    public required string Description { get; set; }
-    public required List<string> AccountCountryBlackList { get; set; }
+    public bool IsAdvert => this[nameof(IsAdvert)].GetBoolean();    
+    public bool IsFreeGame => this[nameof(IsFreeGame)].GetBoolean();
 
     [JsonExtensionData]
     public IDictionary<string, object> Extensions { get; set; } = new Dictionary<string, object>();

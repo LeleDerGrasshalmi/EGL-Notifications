@@ -62,6 +62,7 @@ class Program
             string fileContent = Encoding.UTF8.GetString(fileBytes);
 
             BuildNotificationsData buildNotificationData = JsonSerializer.Deserialize<BuildNotificationsData>(fileContent)!;
+            List<FormattedNotification> formattedNotis = [];
 
             if (!Directory.Exists(_outputPath))
             {
@@ -70,19 +71,57 @@ class Program
 
             foreach (BuildNotification notification in buildNotificationData.BuildNotifications)
             {
-                if (manifest.FileManifestList.FirstOrDefault(x => x.FileName == notification.ImagePath) is FFileManifest imgFile)
+                FormattedNotification formattedNoti = new()
                 {
-                    string imgPath = Path.Combine(_outputPath, $"img-{imgFile.FileName}");
+                    Id = notification.NotificationId,
+                    Condition = notification.DisplayCondition,
+                    Layout = notification.LayoutPath,
+                    Image = notification.ImagePath,
+                    Link = notification.UriLink,
+                    Title = [],
+                    Description = [],
+                    Extensions = notification.Extensions,
+                };
 
-                    using FileStream imgFileStream = new(imgPath, FileMode.OpenOrCreate, FileAccess.Write);
-                    using FFileManifestStream imgStream = imgFile!.GetStream();
+                // i18n
+                foreach (KeyValuePair<string, JsonElement> kv in notification)
+                {
+                    string locale = "en";
 
-                    await imgStream.SaveToAsync(imgFileStream, cancellationToken: token);
+                    if (!kv.Key.StartsWith("Title") && !kv.Key.StartsWith("Description"))
+                    {
+                        if (!FormattedNotification.BlacklistedExtensions.Contains(kv.Key))
+                        {
+                            formattedNoti.Extensions[kv.Key] = kv.Value;
+                        }
+
+                        continue;
+                    }
+
+                    string[] parts = kv.Key.Split("_");
+
+                    if (parts.Length == 2)
+                    {
+                        locale = parts[1];
+                    }
+
+                    if (parts[0] == "Title")
+                    {
+                        formattedNoti.Title[locale] = kv.Value.GetString()!;
+                    }
+                    else
+                    {
+                        formattedNoti.Description[locale] = kv.Value.GetString()!;
+                    }
                 }
+
+                await SaveFileAsync(manifest, notification.ImagePath, Path.Combine(_outputPath, $"image-{notification.ImagePath}"), token);
+
+                formattedNotis.Add(formattedNoti);
             }
 
             string formattedContent = JsonSerializer.Serialize(
-                buildNotificationData.BuildNotifications,
+                formattedNotis,
                 options: new()
                 {
                     WriteIndented = true,
@@ -97,6 +136,17 @@ class Program
             {
                 await KillAuthAsync(auth, token);
             }
+        }
+    }
+
+    private static async Task SaveFileAsync(FBuildPatchAppManifest manifest, string manifestFileName, string outputPath, CancellationToken token)
+    {
+        if (manifest.FileManifestList.FirstOrDefault(x => x.FileName == manifestFileName) is FFileManifest fileManifest)
+        {
+            using FileStream fileStream = new(outputPath, FileMode.OpenOrCreate, FileAccess.Write);
+            using FFileManifestStream fileManifestStream = fileManifest!.GetStream();
+
+            await fileManifestStream.SaveToAsync(fileStream, cancellationToken: token);
         }
     }
 
